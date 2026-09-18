@@ -138,6 +138,16 @@ python3 "$INSTALL_DIR/wechat_connector.py" --check && msg "自检通过"
 
 # 6) 汇总输出
 PUBLIC_IP="$(curl -fsS --connect-timeout 5 https://ifconfig.me 2>/dev/null || curl -fsS --connect-timeout 5 https://api.ipify.org 2>/dev/null || echo '（自动获取失败，请手动确认）')"
+
+# 云厂商识别（用于给出精确的防火墙放行路径）；识别不到给通用说法
+CLOUD=""
+curl -fsS --connect-timeout 3 http://metadata.tencentyun.com/latest/meta-data/instance-name >/dev/null 2>&1 && CLOUD="tencent"
+if [ -z "$CLOUD" ] && curl -fsS --connect-timeout 3 http://100.100.100.200/latest/meta-data/ >/dev/null 2>&1; then CLOUD="aliyun"; fi
+case "$CLOUD" in
+  tencent) FIREWALL_TIP="腾讯云控制台 → 轻量应用服务器 → 本实例 →「防火墙」标签 → 添加规则：TCP / $PORT / 来源 0.0.0.0/0" ;;
+  aliyun)  FIREWALL_TIP="阿里云控制台 → 本实例 →「安全组」→ 配置规则 → 添加入方向规则：TCP / $PORT / 0.0.0.0/0" ;;
+  *)       FIREWALL_TIP="云厂商控制台的防火墙/安全组中放行 TCP $PORT 入站（来源 0.0.0.0/0）" ;;
+esac
 cat <<EOF
 
 ==============================================
@@ -146,6 +156,13 @@ cat <<EOF
   连接器地址   : http://服务器公网IP:$PORT  （建议配置 Nginx + HTTPS 后换成 https:// 域名）
   访问令牌     : $TOKEN
   服务器公网 IP: $PUBLIC_IP
+
+  ⚠️ 必做：放行云防火墙，否则 App 会一直连接超时/被重置
+  （本机健康检查通过 ≠ 外网可达；这是"装完连不上"的头号原因）
+    $FIREWALL_TIP
+  放行后在【你自己的电脑】上验证（不是在服务器上）：
+    curl -m 6 http://$PUBLIC_IP:$PORT/health
+  返回 {"ok":...} 即成功；超时/重置 → 回控制台检查防火墙规则。
 
   最后一步：把公网 IP 加入微信开发者平台
   （developers.weixin.qq.com → 我的业务 → 公众号 →
