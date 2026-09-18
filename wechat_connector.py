@@ -155,6 +155,22 @@ def multipart(field, filename, mime, data):
     return boundary, body
 
 
+def wechat_request_with_retry(cfg, path, params=None, method="GET", content_type=None, body=None):
+    """带令牌失效自愈的公众平台调用：任何人在别处刷新 access_token（新 token 生效
+    后旧 token 作废）都会让本进程缓存的令牌变成 40001/42001/40014，此时强制刷新
+    缓存并重放一次，而不是让分发失败直到缓存自然过期（最长 2 小时）。"""
+    token = fetch_token(cfg, force=False)
+    try:
+        return wechat_request(path, params=dict(params or {}, access_token=token),
+                              method=method, content_type=content_type, body=body)
+    except ApiError as error:
+        if error.errcode not in (40001, 42001, 40014):
+            raise
+        token = fetch_token(cfg, force=True)
+        return wechat_request(path, params=dict(params or {}, access_token=token),
+                              method=method, content_type=content_type, body=body)
+
+
 def save_draft(cfg, payload):
     title = str(payload.get("title") or "未命名文章").strip()[:64]
     digest = str(payload.get("digest") or "").strip()[:120]
@@ -167,13 +183,12 @@ def save_draft(cfg, payload):
     if not images:
         raise ApiError(-5, "公众号草稿需要封面：文章中至少插入一张图片", status=400)
 
-    token = fetch_token(cfg, force=False)
     cover_data, cover_mime, cover_ext = decode_image(images[0])
     if len(cover_data) > 10 * 1024 * 1024:
         raise ApiError(40007, "封面超过 10 MB，请压缩后重试", status=400)
     boundary, body = multipart("media", "cover.%s" % cover_ext, cover_mime, cover_data)
-    cover = wechat_request("/cgi-bin/material/add_material", params={"access_token": token},
-                           method="POST", content_type="multipart/form-data; boundary=%s" % boundary, body=body)
+    cover = wechat_request_with_retry(cfg, "/cgi-bin/material/add_material",
+                                      method="POST", content_type="multipart/form-data; boundary=%s" % boundary, body=body)
     cover_media_id = cover.get("media_id", "")
     if not cover_media_id:
         raise ApiError(-6, "封面上传失败：公众平台未返回 media_id")
@@ -184,8 +199,8 @@ def save_draft(cfg, payload):
         if len(image_data) > 1 * 1024 * 1024:
             raise ApiError(40007, "第 %d 张正文图片超过 1 MB，公众号正文图床不接收" % index, status=400)
         boundary, body = multipart("media", "img%d.%s" % (index, image_ext), image_mime, image_data)
-        hosted = wechat_request("/cgi-bin/media/uploadimg", params={"access_token": token},
-                                method="POST", content_type="multipart/form-data; boundary=%s" % boundary, body=body)
+        hosted = wechat_request_with_retry(cfg, "/cgi-bin/media/uploadimg",
+                                           method="POST", content_type="multipart/form-data; boundary=%s" % boundary, body=body)
         url = hosted.get("url", "")
         if not str(url).startswith(("http://", "https://")):
             raise ApiError(-7, "第 %d 张正文图片上传失败：未返回图床地址" % index)
@@ -198,8 +213,8 @@ def save_draft(cfg, payload):
     if author:
         article["author"] = author
     body = json.dumps({"articles": [article]}, ensure_ascii=False).encode("utf-8")
-    created = wechat_request("/cgi-bin/draft/add", params={"access_token": token},
-                             method="POST", content_type="application/json", body=body)
+    created = wechat_request_with_retry(cfg, "/cgi-bin/draft/add",
+                                        method="POST", content_type="application/json", body=body)
     media_id = created.get("media_id", "")
     if not media_id:
         raise ApiError(-8, "草稿创建失败：公众平台未返回 media_id")
