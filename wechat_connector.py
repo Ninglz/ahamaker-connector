@@ -193,7 +193,19 @@ def save_draft(cfg, payload):
     if not cover_media_id:
         raise ApiError(-6, "封面上传失败：公众平台未返回 media_id")
 
+    # 封面同样会以 data URI 形式留在正文开头（App 会在正文最前插入封面图），
+    # add_draft 的 content 有长度上限，base64 数据留在里面会被微信以
+    # "content size out of limit" 拒绝。所以封面再走一次 uploadimg 换取图床 URL 后替换。
     content = html
+    boundary, body = multipart("media", "cover_uploadimg.%s" % cover_ext, cover_mime, cover_data)
+    try:
+        hosted_cover = wechat_request_with_retry(cfg, "/cgi-bin/media/uploadimg",
+                                                 method="POST", content_type="multipart/form-data; boundary=%s" % boundary, body=body)
+        cover_url = hosted_cover.get("url", "")
+        content = content.replace(images[0], cover_url if str(cover_url).startswith(("http://", "https://")) else "")
+    except ApiError:
+        content = content.replace(images[0], "")  # 图床失败时也要把 base64 移出正文
+
     for index, source in enumerate(images[1:], start=1):
         image_data, image_mime, image_ext = decode_image(source)
         if len(image_data) > 1 * 1024 * 1024:
